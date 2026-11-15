@@ -80,7 +80,7 @@ npx -p workbuddy-bridge workbuddy-doctor    # environment check
 ### Option 3: clone the source
 
 ```bash
-git clone https://github.com/hanhan1223/workbuddy-bridge.git
+git clone https://github.com/chenxingdi/workbuddy-bridge.git
 cd workbuddy-bridge
 node doctor.js
 ```
