@@ -568,11 +568,36 @@ different things. **Read `msg`, not just `code`.**
 
 | Error | Real meaning | What to do |
 |---|---|---|
+| `11128` / `request illegal` | the **conversation-identity headers are missing** — not a prompt or policy problem | See the section below; fixed in v1.2.2 |
 | `11128` / `unapproved channel` | system prompt contains a **competitor client identifier** | See the section below |
 | `11128` / `first message is not system prompt` | First message is not system | Handled automatically |
 | `11148` / `tool calls and tool results do not match` | Tool calls and results cannot be paired | Fixed |
 | `11102` / `model … service info not found` | Model name does not exist | Check the model id (strip suffixes like `[1M]`) |
 | `14003` / `too many requests` | **Rate limited** | Wait 1–2 minutes, or pick a less busy model |
+
+### `11128 / request illegal`
+
+**Not a prompt or content problem at all.** The `displayTips` text says the call
+"failed channel verification, possibly because it was not sent from an official
+client", which reads like risk control; it is literally about request headers.
+The international gateway counts four conversation headers as one set and
+rejects the request until **all four** are present:
+
+`X-Conversation-ID`, `X-Conversation-Message-ID`, `X-Conversation-Request-ID`,
+`X-Request-ID`.
+
+Measured on both deployments (2026-11-15) by adding one group at a time:
+
+| Headers sent | International | China |
+|---|---|---|
+| none | 400 `11128 request illegal` | 200 |
+| any one of the four | 400 `11128 request illegal` | 200 |
+| any two or three of them | 400 `11128 request illegal` | 200 |
+| **all four** | **200 SSE** | **200** |
+
+The `X-Agent-*` / `X-Product-Code` / `X-Session-ID` / `X-Model-ID` family is
+**not** required by either deployment. `X-Conversation-ID` must stay constant
+per conversation, because the gateway keys its prefix cache on it.
 
 ### `11128 / unapproved channel`
 

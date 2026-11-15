@@ -548,11 +548,32 @@ WorkBuddy 的错误码**含义不唯一**，同一个 `code` 可能是完全不�
 
 | 错误 | 真正含义 | 怎么办 |
 |---|---|---|
+| `11128` / `request illegal` | **会话标识请求头缺失**，与提示词、内容审查无关 | 见下方专节；v1.2.2 已修复 |
 | `11128` / `unapproved channel` | system 提示词含**竞品客户端标识** | 见下方专节 |
 | `11128` / `first message is not system prompt` | 首条消息不是 system | 已自动处理 |
 | `11148` / `tool calls and tool results do not match` | 工具调用与结果配对不上 | 已修复 |
 | `11102` / `model … service info not found` | 模型名不存在 | 检查模型 id（去掉 `[1M]` 之类后缀）|
 | `14003` / `too many requests` | **限流** | 等 1–2 分钟，或换负载低的模型 |
+
+### `11128 / request illegal`
+
+**跟提示词和内容毫无关系。** `displayTips` 写着"没通过渠道校验，可能不是官方客户端发出的"，
+读起来像风控，实际就是**请求头字段缺失**。海外版把四个会话标识头当成一个整体校验，
+**四个全部带上才放行**：
+
+`X-Conversation-ID`、`X-Conversation-Message-ID`、`X-Conversation-Request-ID`、`X-Request-ID`。
+
+2026-11-15 在两个部署上逐个加组实测：
+
+| 送哪些头 | 海外版 | 大陆版 |
+|---|---|---|
+| 一个都没有 | 400 `11128 request illegal` | 200 |
+| 其中任意 1 个 | 400 `11128 request illegal` | 200 |
+| 其中任意 2～3 个 | 400 `11128 request illegal` | 200 |
+| **四个全带** | **200 SSE** | **200** |
+
+`X-Agent-*` / `X-Product-Code` / `X-Session-ID` / `X-Model-ID` 那一套**两个部署都不需要**。
+`X-Conversation-ID` 必须在一次会话里保持不变，因为网关的前缀缓存按它分桶。
 
 ### `11128 / unapproved channel`
 

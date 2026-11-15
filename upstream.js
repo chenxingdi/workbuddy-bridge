@@ -15,6 +15,7 @@
  */
 
 import { loadCredentials, electronPath, editionDomain } from './credentials.js';
+import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -155,12 +156,94 @@ function commonHeaders(credential) {
 }
 
 /**
+ * The conversation-identity headers chat is gated on.
+ *
+ * Measured live against both deployments (2026-11-15) by sending a minimal
+ * chat request and adding one group at a time:
+ *
+ *   | headers sent                      | international | China |
+ *   |-----------------------------------|---------------|-------|
+ *   | none (what this used to send)     | 400 / 11128   | 200   |
+ *   | `X-Conversation-ID` alone         | 400 / 11128   | 200   |
+ *   | `X-Conversation-Message-ID` alone | 400 / 11128   | 200   |
+ *   | `X-Conversation-Request-ID` alone | 400 / 11128   | 200   |
+ *   | `X-Request-ID` alone              | 400 / 11128   | 200   |
+ *   | any two or three of them          | 400 / 11128   | 200   |
+ *   | **all four**                      | **200 SSE**   | **200** |
+ *   | all four + every `X-Agent-*` / `X-Product-Code` / `X-Session-ID` / `X-Model-ID` | 200 | 200 |
+ *
+ * So the international gateway counts these four as one set and rejects the
+ * request as `11128 request illegal` — which reads as "not an official
+ * client" — until all of them are present. The `X-Agent-*` family the
+ * mainland gateway is known to want turned out **not** to be required by
+ * either deployment, so it is deliberately not sent here. The China gateway
+ * accepts a single conversation id, and sending all four there is not a
+ * regression.
+ *
+ * `X-Conversation-ID` is one value per process: the gateway keys its prefix
+ * cache on it, so a fresh identity per request would drop every conversation
+ * into a different cache bucket.
+ *
+ * `X-Conversation-Message-ID` / `X-Conversation-Request-ID` / `X-Request-ID`
+ * identify *the message being answered*, so retrying one step keeps the same
+ * ids instead of looking like a brand-new message on every attempt.
+ */
+function conversationHeaders(messageId) {
+  const sessionId = processSessionId();
+  return {
+    'X-Conversation-ID': sessionId,
+    'X-Conversation-Message-ID': messageId,
+    'X-Conversation-Request-ID': messageId,
+    'X-Request-ID': messageId,
+  };
+}
+
+/** One conversation identity per process, created on first use. */
+let sessionId;
+function processSessionId() {
+  return sessionId ??= crypto.randomUUID().replace(/-/g, '');
+}
+
+/**
+ * A stable id for the message being answered.
+ *
+ * Keyed on the last user turn *and its position*: two identical "continue"
+ * turns are different messages, and hashing the text alone would give both the
+ * same id — one conversation slot for two requests.
+ */
+function messageIdFor(payload, sessionIdValue = processSessionId()) {
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  let index = -1;
+  for (let cursor = messages.length - 1; cursor >= 0; cursor -= 1) {
+    if (messages[cursor]?.role === 'user') {
+      index = cursor;
+      break;
+    }
+  }
+  const content = index === -1 ? undefined : messages[index]?.content;
+  const text =
+    typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content.map((block) => String(block?.text ?? '')).join('')
+        : '';
+  return crypto
+    .createHash('sha1')
+    .update(`${sessionIdValue}:${index}:${messages.length}:${text}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+/**
  * Chat headers.
  *
  * `User-Agent` and `X-IDE-Version` must carry the DESKTOP identity here. The
  * CLI-shaped UA used by the catalog triggers HTTP 400 / code 11128 on chat.
+ *
+ * `payload` is the body being sent: the conversation-identity headers are
+ * derived from it, so they must describe this request rather than a blank one.
  */
-function chatHeaders(credential, identity = resolveChatIdentity(credential.edition)) {
+function chatHeaders(credential, payload, identity = resolveChatIdentity(credential.edition)) {
   return {
     ...commonHeaders(credential),
     'User-Agent': chatUserAgent(identity, credential.edition),
@@ -172,6 +255,7 @@ function chatHeaders(credential, identity = resolveChatIdentity(credential.editi
     'X-IDE-Name': 'WorkBuddy',
     'X-IDE-Version': identity.clientVersion,
     'X-Product': 'SaaS',
+    ...conversationHeaders(messageIdFor(payload)),
     Authorization: `Bearer ${credential.accessToken}`,
   };
 }
@@ -521,11 +605,12 @@ async function runChat(body, { onDelta, signal, edition = 'ai', credential } = {
   }
 
   if (process.env.WORKBUDDY_DEBUG === '1') {
-    const h = chatHeaders(cred);
+    const h = chatHeaders(cred, payload);
     console.error('[debug] edition          :', cred.edition ?? edition);
     console.error('[debug] upstream UA      :', h['User-Agent']);
     console.error('[debug] upstream X-IDE   :', h['X-IDE-Type'], h['X-IDE-Name'], h['X-IDE-Version']);
     console.error('[debug] upstream X-User  :', h['X-User-Id'] ?? '(none)');
+    console.error('[debug] upstream conv ids:', h['X-Conversation-ID'], h['X-Conversation-Message-ID']);
     console.error('[debug] upstream payload :', JSON.stringify(payload).slice(0, 600));
     console.error('[debug] upstream status  :', response.status);
   }
@@ -581,7 +666,7 @@ async function sendChat(credential, payload, signal) {
 
   return fetch(`${originFor(credential)}/v2/chat/completions`, {
     method: 'POST',
-    headers: chatHeaders(credential),
+    headers: chatHeaders(credential, payload),
     body: JSON.stringify(payload),
     signal: combined,
   });
